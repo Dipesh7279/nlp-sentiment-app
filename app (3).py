@@ -79,19 +79,25 @@ st.write("Enter a movie review below to see if it is Positive or Negative.")
 
 user_input = st.text_area("Review Text", "")
 show_debug = st.checkbox("Show debug info")
+skip_preprocessing = st.checkbox("Skip preprocessing (use raw text)")
 
 if st.button("Predict"):
     if user_input.strip() == "":
         st.warning("Please enter some text.")
     else:
         cleaned = clean_text(user_input)
-        if cleaned.strip() == "":
+        # choose input based on skip_preprocessing
+        model_input_text = user_input if skip_preprocessing else cleaned
+
+        if model_input_text.strip() == "":
             st.warning("Text was empty after preprocessing — try a longer input or adjust preprocessing.")
+
         # transform to sparse vector (no toarray) to preserve expected format
-        vec = tfidf.transform([cleaned])
+        vec = tfidf.transform([model_input_text])
 
         if show_debug:
-            st.write("Cleaned text:", cleaned)
+            st.write("Using raw text:" if skip_preprocessing else "Using preprocessed text:")
+            st.write(model_input_text)
             try:
                 nonzero = int(vec.nnz)
             except Exception:
