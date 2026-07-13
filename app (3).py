@@ -1,14 +1,19 @@
-
 import streamlit as st
 import pickle
 import re
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
 import nltk
 
-# Setup NLTK
-nltk.download('stopwords')
-nltk.download('wordnet')
+# Ensure required NLTK resources are available (download only if missing)
+for resource_path, resource_name in [('corpora/stopwords','stopwords'), ('corpora/wordnet','wordnet')]:
+    try:
+        nltk.data.find(resource_path)
+    except LookupError:
+        nltk.download(resource_name, quiet=True)
+
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+# Setup NLTK variables
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 
