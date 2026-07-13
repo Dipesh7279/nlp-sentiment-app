@@ -3,6 +3,7 @@ import pickle
 import re
 import nltk
 import numpy as np
+import requests
 
 # Ensure required NLTK resources are available (download only if missing)
 for resource_path, resource_name in [('corpora/stopwords','stopwords'), ('corpora/wordnet','wordnet')]:
@@ -81,54 +82,122 @@ user_input = st.text_area("Review Text", "")
 show_debug = st.checkbox("Show debug info")
 skip_preprocessing = st.checkbox("Skip preprocessing (use raw text)")
 
+# Model selection: local sklearn or Hugging Face Inference API
+model_choice = st.radio("Choose model", ("sklearn (local)", "huggingface (HF Inference API)"))
+
+# Helper to call HF Inference API
+HF_DEFAULT_MODEL = "distilbert-base-uncased-finetuned-sst-2-english"
+
+def call_hf_api(text: str, hf_api_key: str, model_name: str = HF_DEFAULT_MODEL):
+    url = f"https://api-inference.huggingface.co/models/{model_name}"
+    headers = {"Authorization": f"Bearer {hf_api_key}", "Content-Type": "application/json"}
+    payload = {"inputs": text}
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        # Response can be [{'label': 'POSITIVE', 'score': 0.99}] or similar
+        if isinstance(data, dict) and data.get('error'):
+            return None, f"HF API error: {data.get('error')}"
+        if isinstance(data, list) and len(data) > 0:
+            item = data[0]
+            label = item.get('label')
+            score = float(item.get('score', 0.0))
+            return {'label': label, 'score': score}, None
+        return None, "Unexpected HF response format"
+    except Exception as e:
+        return None, str(e)
+
 if st.button("Predict"):
     if user_input.strip() == "":
         st.warning("Please enter some text.")
     else:
         cleaned = clean_text(user_input)
-        # choose input based on skip_preprocessing
         model_input_text = user_input if skip_preprocessing else cleaned
 
         if model_input_text.strip() == "":
             st.warning("Text was empty after preprocessing — try a longer input or adjust preprocessing.")
 
-        # transform to sparse vector (no toarray) to preserve expected format
-        vec = tfidf.transform([model_input_text])
-
-        if show_debug:
-            st.write("Using raw text:" if skip_preprocessing else "Using preprocessed text:")
-            st.write(model_input_text)
-            try:
-                nonzero = int(vec.nnz)
-            except Exception:
-                try:
-                    nonzero = int(np.count_nonzero(vec.toarray()))
-                except Exception:
-                    nonzero = None
-            st.write("Non-zero TF-IDF features:", nonzero)
-            if hasattr(model, 'classes_'):
-                st.write("Model classes:", model.classes_)
-
-        # Use predict_proba when available to determine predicted class robustly
+        # If user selected HF model, call HF API. Otherwise use local sklearn pipeline.
         predicted_class = None
         predicted_proba = None
-        try:
-            if hasattr(model, 'predict_proba'):
-                probs = model.predict_proba(vec)
-                class_idx = int(np.argmax(probs, axis=1)[0])
-                predicted_class = model.classes_[class_idx]
-                predicted_proba = probs[0].tolist()
-            else:
-                preds = model.predict(vec)
-                predicted_class = preds[0]
-        except Exception as e:
-            st.error(f"Model prediction failed: {e}")
-            raise
+        raw_label = None
 
-        # Determine sentiment mapping (assume class '1' -> Positive)
-        sentiment = "Positive" if int(predicted_class) == 1 else "Negative"
+        if model_choice == "huggingface (HF Inference API)":
+            hf_api_key = st.secrets.get('HF_API_KEY') if hasattr(st, 'secrets') else None
+            if not hf_api_key:
+                hf_api_key = st.text_input('Enter Hugging Face API key', type='password')
+            if not hf_api_key:
+                st.error('Hugging Face API key is required for this option. Set HF_API_KEY in Streamlit secrets or enter it here.')
+            else:
+                result, err = call_hf_api(model_input_text, hf_api_key)
+                if err:
+                    st.error(f"Hugging Face inference failed: {err}\nFalling back to local model.")
+                    model_choice = "sklearn (local)"
+                else:
+                    raw_label = result['label']
+                    score = result['score']
+                    # Map HF labels to sentiment
+                    if raw_label.upper().startswith('POS') or raw_label.upper().startswith('LABEL_1'):
+                        predicted_class = 1
+                    else:
+                        predicted_class = 0
+                    predicted_proba = [1 - score, score] if predicted_class == 1 else [score, 1 - score]
+
+        if model_choice == "sklearn (local)":
+            # transform to sparse vector (no toarray) to preserve expected format
+            vec = tfidf.transform([model_input_text])
+
+            if show_debug:
+                st.write("Using raw text:" if skip_preprocessing else "Using preprocessed text:")
+                st.write(model_input_text)
+                try:
+                    nonzero = int(vec.nnz)
+                except Exception:
+                    try:
+                        nonzero = int(np.count_nonzero(vec.toarray()))
+                    except Exception:
+                        nonzero = None
+                st.write("Non-zero TF-IDF features:", nonzero)
+                if hasattr(model, 'classes_'):
+                    st.write("Model classes:", model.classes_)
+
+            try:
+                if hasattr(model, 'predict_proba'):
+                    probs = model.predict_proba(vec)[0]
+                    # pick the class with highest probability
+                    idx = int(np.argmax(probs))
+                    predicted_class = int(model.classes_[idx]) if hasattr(model, 'classes_') else int(idx)
+                    predicted_proba = probs.tolist()
+                else:
+                    preds = model.predict(vec)
+                    predicted_class = int(preds[0])
+            except Exception as e:
+                st.error(f"Model prediction failed: {e}")
+                raise
+
+        # Map predicted_class to human-readable sentiment
+        sentiment = None
+        if predicted_class is not None:
+            # If model.classes_ contains strings, handle accordingly
+            try:
+                sentiment = "Positive" if int(predicted_class) == 1 else "Negative"
+            except Exception:
+                # handle string labels like 'POS'/'NEG' or 'pos'/'neg'
+                if isinstance(predicted_class, str) and predicted_class.lower().startswith('pos'):
+                    sentiment = 'Positive'
+                else:
+                    sentiment = 'Negative'
 
         color = "green" if sentiment == "Positive" else "red"
-        if predicted_proba is not None and show_debug:
+
+        if show_debug and raw_label is not None:
+            st.write("Hugging Face raw label:", raw_label)
+            st.write("Hugging Face score:", score)
+        if show_debug and predicted_proba is not None:
             st.write("Predicted probabilities:", predicted_proba)
-        st.markdown(f"### Prediction: <span style='color:{color}'>{sentiment}</span>", unsafe_allow_html=True)
+
+        if sentiment is not None:
+            st.markdown(f"### Prediction: <span style='color:{color}'>{sentiment}</span>", unsafe_allow_html=True)
+        else:
+            st.error('Could not determine sentiment from model output.')
